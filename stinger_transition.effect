@@ -1,0 +1,57 @@
+uniform float4x4  ViewProj;
+uniform texture2d a_tex;
+uniform texture2d b_tex;
+//uniform texture2d s_tex;
+//uniform float progress;
+//uniform float cut;
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+//Overlay "Top" on "Base"
+float4 Overlay(float4 Base, float4 Top)
+{
+	float4 Res;
+	half3 BaseVisible = Base.rgb * (1 - Top.a);
+	half3 TopVisible = Top.rgb * (Top.a);
+	
+	float3 finalColor =  (BaseVisible + TopVisible) * (1,1,1,1);
+	Res.rgb = finalColor;
+	Res.a = 1.0f;
+	return Res;
+}
+
+float4 PSStinger(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float4 a_color = a_tex.Sample(textureSampler, uv);
+	float4 b_color = b_tex.Sample(textureSampler, uv);
+	//float4 s_color = s_tex.Sample(textureSampler, uv);
+
+	return Overlay(a_color, b_color);
+}
+
+technique Stinger
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSStinger(v_in);
+	}
+}
