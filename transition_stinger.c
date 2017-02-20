@@ -41,7 +41,7 @@ struct stinger_info {
 	gs_texture_t * stinger_texture;
 	gs_image_file_t stinger_error_image;
 
-	//struct obs_source_audio *audio_data;
+	struct obs_source_audio *audio_data;
 
 	float cutTime;
 	size_t cutFrame;
@@ -262,38 +262,38 @@ static bool video_frame(struct ff_frame *frame, void *opaque)
 		return video_frame_direct(frame, s, pFrame);
 }
 
-//static bool audio_frame(struct ff_frame *frame, void *opaque)
-//{
-//	struct stinger_info *s = opaque;
-//
-//	struct obs_source_audio *audio_data;
-//	s->audio_data = bzalloc(sizeof(*audio_data));
-//
-//	uint64_t pts;
-//
-//	// Media ended
-//	if (frame == NULL || frame->frame == NULL)
-//		return true;
-//
-//	pts = (uint64_t)(frame->pts * 1000000000.0L);
-//
-//	int channels = av_frame_get_channels(frame->frame);
-//
-//	for (int i = 0; i < channels; i++)
-//		audio_data->data[i] = frame->frame->data[i];
-//
-//	audio_data->samples_per_sec = frame->frame->sample_rate;
-//	audio_data->frames = frame->frame->nb_samples;
-//	audio_data->timestamp = pts;
-//	audio_data->format =
-//		convert_ffmpeg_sample_format(frame->frame->format);
-//	audio_data->speakers = channels;
-//
-//	s->audio_data = audio_data;
-//	//obs_source_output_audio(s->source, &audio_data);
-//
-//	return true;
-//}
+static bool audio_frame(struct ff_frame *frame, void *opaque)
+{
+	struct stinger_info *s = opaque;
+
+	struct obs_source_audio *audio_data;
+	audio_data = bzalloc(sizeof(*audio_data));
+
+	uint64_t pts;
+
+	// Media ended
+	if (frame == NULL || frame->frame == NULL)
+		return true;
+
+	pts = (uint64_t)(frame->pts * 1000000000.0L);
+
+	int channels = av_frame_get_channels(frame->frame);
+
+	for (int i = 0; i < channels; i++)
+		audio_data->data[i] = frame->frame->data[i];
+
+	audio_data->samples_per_sec = frame->frame->sample_rate;
+	audio_data->frames = frame->frame->nb_samples;
+	audio_data->timestamp = pts;
+	audio_data->format =
+		convert_ffmpeg_sample_format(frame->frame->format);
+	audio_data->speakers = channels;
+
+	s->audio_data = audio_data;
+	obs_source_output_audio(s->source, &audio_data);
+
+	return true;
+}
 
 
 
@@ -310,9 +310,9 @@ static void ffmpeg_source_start(struct stinger_info *s)
 		video_frame, NULL,
 		NULL, NULL, NULL, s);
 
-	//ff_demuxer_set_callbacks(&s->demuxer->audio_callbacks,
-	//	audio_frame, NULL,
-	//	NULL, NULL, NULL, s);
+	ff_demuxer_set_callbacks(&s->demuxer->audio_callbacks,
+		audio_frame, NULL,
+		NULL, NULL, NULL, s);
 
 	ff_demuxer_open(s->demuxer, s->path, NULL);
 }
@@ -505,6 +505,11 @@ static void stinger_callback(void *data, gs_texture_t *a, gs_texture_t *b,
 
 		stinger->curFrame = 0;
 		stinger->lastTime = t;
+
+		if (stinger->demuxer != NULL) {
+			ff_demuxer_free(stinger->demuxer);
+			stinger->demuxer = NULL;
+		}
 		ffmpeg_source_start(stinger);
 	}
 	
@@ -549,7 +554,7 @@ static bool stinger_audio_render(void *data, uint64_t *ts_out,
 {
 	struct stinger_info *stinger = data;
 	//audio->output->data;
-	//stinger->audio_data->data;
+	stinger->audio_data->data;
 
 	return obs_transition_audio_render(stinger->source, ts_out,
 		audio, mixers, channels, sample_rate, mix_a, mix_b);
