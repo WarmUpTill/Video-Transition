@@ -414,6 +414,7 @@ static void stinger_update(void *data, obs_data_t *settings)
 		//error image not needed if valid input
 		obs_enter_graphics();
 		gs_image_file_free(&stinger->stinger_error_image);
+		stinger->stinger_texture = NULL;
 		obs_leave_graphics();
 
 		obs_transition_enable_fixed(stinger->source, true,
