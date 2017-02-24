@@ -1,12 +1,9 @@
 #include <obs-module.h>
+#include <obs-internal.h>
 #include <graphics/image-file.h>
 #include <util/dstr.h>
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
-#include <libavutil/pixfmt.h>
-
-
+#include <media-io/audio-resampler.h>
 
 #include "obs-ffmpeg-compat.h"
 #include "obs-ffmpeg-formats.h"
@@ -38,7 +35,7 @@ struct stinger_info {
 
 	float lastTime;
 
-	gs_texture_t * stinger_texture;
+	gs_texture_t *stinger_texture;
 	gs_image_file_t stinger_error_image;
 
 	struct obs_source_audio *audio_data;
@@ -173,7 +170,7 @@ struct stinger_info *s, AVFrame *pFrame)
 {
 	if (!update_sws_context(s, frame->frame))
 	{
-		av_frame_free(&frame);
+		av_frame_free(&pFrame);
 		return false;
 	}
 	
@@ -266,31 +263,34 @@ static bool audio_frame(struct ff_frame *frame, void *opaque)
 {
 	struct stinger_info *s = opaque;
 
-	struct obs_source_audio *audio_data;
-	audio_data = bzalloc(sizeof(*audio_data));
-
+	struct obs_source_audio audio_data;
 	uint64_t pts;
 
-	// Media ended
-	if (frame == NULL || frame->frame == NULL)
-		return true;
+	bfree(s->audio_data);
 
+	// Media ended
+	if (frame == NULL || frame->frame == NULL){
+		s->audio_data = NULL;
+		return true;
+	}
+	
 	pts = (uint64_t)(frame->pts * 1000000000.0L);
 
 	int channels = av_frame_get_channels(frame->frame);
 
 	for (int i = 0; i < channels; i++)
-		audio_data->data[i] = frame->frame->data[i];
+		audio_data.data[i] = frame->frame->data[i];
 
-	audio_data->samples_per_sec = frame->frame->sample_rate;
-	audio_data->frames = frame->frame->nb_samples;
-	audio_data->timestamp = pts;
-	audio_data->format =
+	audio_data.samples_per_sec = frame->frame->sample_rate;
+	audio_data.frames = frame->frame->nb_samples;
+	audio_data.timestamp = pts;
+	audio_data.format =
 		convert_ffmpeg_sample_format(frame->frame->format);
-	audio_data->speakers = channels;
+	audio_data.speakers = channels;
 
-	s->audio_data = audio_data;
-	obs_source_output_audio(s->source, &audio_data);
+	s->audio_data = bzalloc(sizeof(audio_data));
+
+	memcpy(s->audio_data, &audio_data, sizeof audio_data);
 
 	return true;
 }
@@ -341,7 +341,6 @@ static inline void load_error_texture(struct stinger_info *stinger)
 
 static uint32_t get_duration_ms(struct stinger_info *stinger)
 {
-	//get duration of stinger
 	AVCodecContext *pCodecCtx = NULL;
 	AVCodec *pCodec = NULL;
 	AVFormatContext *pFormatCtx = NULL;
@@ -360,7 +359,7 @@ static uint32_t get_duration_ms(struct stinger_info *stinger)
 		return 3000; // Couldn't find stream information
 	}
 
-	int videoStream = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, pCodec, 0);
+	int videoStream = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &pCodec, 0);
 
 	pCodecCtx = pFormatCtx->streams[videoStream]->codec;
 
@@ -398,19 +397,10 @@ static void stinger_update(void *data, obs_data_t *settings)
 
 	stinger->path = obs_data_get_string(settings, "stingerPath");
 	stinger->cutFrame = obs_data_get_int(settings, "cutFrame");
+	stinger->numberOfFrames = obs_data_get_int(settings, "numberOfFrames");
 
-	int numberOfFrames = checkInputFile(stinger->path);
-
-	if (numberOfFrames > 1){
+	if (stinger->numberOfFrames > 1){
 		stinger->validInput = true;
-		stinger->numberOfFrames = numberOfFrames;
-		obs_data_set_int(settings, "numberOfFrames", numberOfFrames);
-
-		if (stinger->cutFrame - 1 > numberOfFrames){
-			stinger->cutFrame = numberOfFrames - 1;
-			obs_data_set_int(settings, "cutFrame", stinger->cutFrame);
-		}
-
 		//error image not needed if valid input
 		obs_enter_graphics();
 		gs_image_file_free(&stinger->stinger_error_image);
@@ -444,6 +434,7 @@ static void *stinger_create(obs_data_t *settings, obs_source_t *source)
 	obs_enter_graphics();
 	effect = gs_effect_create_from_file(file, NULL);
 	obs_leave_graphics();
+
 	bfree(file);
 
 	if (!effect) {
@@ -451,7 +442,7 @@ static void *stinger_create(obs_data_t *settings, obs_source_t *source)
 		return NULL;
 	}
 
-	stinger = bzalloc(sizeof(*stinger));
+	stinger = bzalloc(sizeof(struct stinger_info));
 
 	stinger->effect = effect;
 	stinger->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
@@ -474,6 +465,8 @@ static void stinger_destroy(void *data)
 	if (stinger->sws_ctx != NULL)
 		sws_freeContext(stinger->sws_ctx);
 	bfree(stinger->sws_data);
+
+	bfree(stinger->audio_data);
 
 	obs_enter_graphics();
 	if (!stinger->validInput)
@@ -504,7 +497,6 @@ static void stinger_callback(void *data, gs_texture_t *a, gs_texture_t *b,
 		obs_leave_graphics();
 
 		stinger->curFrame = 0;
-		stinger->lastTime = t;
 
 		if (stinger->demuxer != NULL) {
 			ff_demuxer_free(stinger->demuxer);
@@ -533,30 +525,37 @@ static void stinger_video_render(void *data, gs_effect_t *effect)
 	obs_transition_video_render(stinger->source, stinger_callback);
 	UNUSED_PARAMETER(effect);
 }
-//TODO AUDIO RENDER OF STINGER VIDEO
+
 static float mix_a(void *data, float t)
 {
 	UNUSED_PARAMETER(data);
-	//return lerp(1.0f - t , 0.0f, smoothstep(0.0f, sp, t));
-	return 1.0f - t;;
+	return 1.0f - t;
 }
 
 static float mix_b(void *data, float t)
 {
 	UNUSED_PARAMETER(data);
-	//return lerp(0.0f, t, smoothstep(cutFrame, 1.0f, t))
 	return t;
+}
+
+bool stinger_audio(obs_source_t *transition,
+	uint64_t *ts_out, struct obs_source_audio_mix *audio,
+	uint32_t mixers, size_t channels, size_t sample_rate,
+	obs_transition_audio_mix_callback_t mix_a,
+	obs_transition_audio_mix_callback_t mix_b)
+{
+	//transition->source not initialized?
+
+	return false;
 }
 
 static bool stinger_audio_render(void *data, uint64_t *ts_out,
 		struct obs_source_audio_mix *audio, uint32_t mixers,
 		size_t channels, size_t sample_rate)
 {
-	struct stinger_info *stinger = data;
-	//audio->output->data;
-	stinger->audio_data->data;
+	struct stinger_info *s = data;
 
-	return obs_transition_audio_render(stinger->source, ts_out,
+	return stinger_audio(s->source, ts_out,
 		audio, mixers, channels, sample_rate, mix_a, mix_b);
 }
 
@@ -582,12 +581,11 @@ static int checkInputFile(const char* file)
 		return -1;
 	}
 
-	int i;
 	AVCodecContext *pCodecCtxOrig = NULL;
 	AVCodecContext *pCodecCtx = NULL;
 	AVCodec *pCodec = NULL;
 
-	int videoStream = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, pCodec, 0);
+	int videoStream = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &pCodec, 0);
 
 	pCodecCtxOrig = pFormatCtx->streams[videoStream]->codec;
 
@@ -639,8 +637,8 @@ static int checkInputFile(const char* file)
 
 static bool stingerPathModified(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
-	char* prevPath = obs_data_get_string(settings, "prevPath");
-	char* file = obs_data_get_string(settings, "stingerPath");
+	const char* prevPath = obs_data_get_string(settings, "prevPath");
+	const char* file = obs_data_get_string(settings, "stingerPath");
 	int numberOfFrames = 0;
 
 	obs_property_t *slider = obs_properties_get(props, "cutFrame");
@@ -659,16 +657,23 @@ static bool stingerPathModified(obs_properties_t *props, obs_property_t *propert
 	
 	numberOfFrames = checkInputFile(path.array);
 
-	if (numberOfFrames > 1)
+	if (numberOfFrames > 1){
 		obs_property_int_set_limits(slider, 1, numberOfFrames, 1);
-	else
+		//set slider in the middle
+		obs_data_set_int(settings, "cutFrame", numberOfFrames / 2);
+		obs_data_set_int(settings, "numberOfFrames", numberOfFrames);
+	}
+	else{
 		obs_property_int_set_limits(slider, 1, 1, 1);
+		obs_data_set_int(settings, "numberOfFrames", 1);
+	}
 
 	obs_data_set_string(settings, "prevPath", path.array);
 
 	dstr_free(&path);
 
 	UNUSED_PARAMETER(property);
+	return true;
 }
 
 
@@ -677,6 +682,8 @@ static obs_properties_t *stinger_properties(void *data)
 	struct stinger_info *stinger = data;
 
 	obs_properties_t *ppts = obs_properties_create();
+
+	obs_properties_set_flags(ppts, OBS_PROPERTIES_DEFER_UPDATE);
 
 	obs_property_t *pathProp = obs_properties_add_path(ppts, "stingerPath", 
 		"Path to stinger video", OBS_PATH_FILE, "", "");
@@ -693,7 +700,6 @@ static void stinger_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "cutFrame", 1);
 	obs_data_set_default_int(settings, "numberOfFrames", 1);
-	obs_data_set_default_bool(settings, "validInput", false);
 	obs_data_set_default_string(settings, "stingerPath", "");
 #if defined(_WIN32)
 	obs_data_set_default_bool(settings, "hw_decode", true);
@@ -728,6 +734,8 @@ static void stinger_deactivate(void *data)
 	s->sws_format = 0;
 	s->sws_height = 0;
 	s->sws_width = 0;
+
+	bfree(s->audio_data);
 
 	obs_enter_graphics();
 	if (!s->validInput)
